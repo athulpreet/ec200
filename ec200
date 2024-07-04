@@ -1,0 +1,148 @@
+#include <xc.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+
+// Configuration bits (for PIC18F26K22 with external 4MHz crystal)
+#pragma config FOSC = HSMP      // External High Speed Medium Power Crystal Oscillator
+#pragma config PLLCFG = OFF     // 4X PLL disabled
+#pragma config PRICLKEN = ON    // Primary clock enabled
+#pragma config FCMEN = OFF      // Fail-Safe Clock Monitor disabled
+#pragma config IESO = OFF       // Internal/External Oscillator Switchover bit
+#pragma config WDTEN = OFF      // Watchdog Timer disabled
+#pragma config PBADEN = OFF     // PORTB<5:0> pins are configured as digital I/O on Reset
+#pragma config LVP = OFF        // Single-Supply ICSP disabled
+#pragma config MCLRE = EXTMCLR  // MCLR pin enabled; RE3 input disabled
+
+#define _XTAL_FREQ 4000000      // Define oscillator frequency for __delay_ms()
+#define EC200_BUFFER_SIZE 256   // Size of EC200 data buffer
+
+// Function prototypes
+void SYSTEM_Initialize(void);
+void UART2_Initialize(void);
+void UART2_TransmitChar(char c);
+void UART2_TransmitString(const char* str);
+bool UART2_DataAvailable(void);
+char UART2_ReceiveChar(void);
+void sendEC200Command(const char* command);
+void processEC200Response(void);
+
+char ec200Buffer[EC200_BUFFER_SIZE];
+uint8_t ec200BufferIndex = 0;
+bool newEC200DataAvailable = false;
+
+void __interrupt() ISR(void)
+{
+    if(PIR3bits.RC2IF)
+    {
+        char receivedChar = RCREG2;
+        if(ec200BufferIndex < EC200_BUFFER_SIZE - 1)
+        {
+            ec200Buffer[ec200BufferIndex++] = receivedChar;
+            if(receivedChar == '\n')
+            {
+                ec200Buffer[ec200BufferIndex] = '\0';
+                newEC200DataAvailable = true;
+                ec200BufferIndex = 0;
+            }
+        }
+        else
+        {
+            ec200BufferIndex = 0; // Reset if buffer is full
+        }
+        PIR3bits.RC2IF = 0; // Clear the interrupt flag
+    }
+}
+
+void main(void)
+{
+    SYSTEM_Initialize();
+    
+    // Enable global and peripheral interrupts
+    INTCONbits.GIE = 1;
+    INTCONbits.PEIE = 1;
+    
+    // Initialize EC200 module
+    sendEC200Command("AT\r\n");
+    __delay_ms(1000);
+    sendEC200Command("ATE1\r\n");
+    __delay_ms(1000);
+    sendEC200Command("AT+CMEE=2\r\n");
+    __delay_ms(1000);
+    
+    // Set up MQTT connection
+    sendEC200Command("AT+CGDCONT=1,\"IP\",\"airtelgprs.com\"\r\n");
+    __delay_ms(1000);
+    sendEC200Command("AT+CGACT=1,1\r\n");
+    __delay_ms(2000);
+    sendEC200Command("AT+QMTOPEN=0,\"13.127.132.136\",1883\r\n");
+    __delay_ms(5000);
+    sendEC200Command("AT+QMTCONN=0,\"myDevice123\"\r\n");
+    __delay_ms(5000);
+    
+    while(1)
+    {
+        // Publish "ATHUL" to MQTT topic "T" every 10 seconds
+        sendEC200Command("AT+QMTPUB=0,1,1,0,\"T\",\"ATHUL\"\r\n");
+        __delay_ms(10000);
+        
+        if(newEC200DataAvailable)
+        {
+            processEC200Response();
+            newEC200DataAvailable = false;
+        }
+    }
+}
+
+void SYSTEM_Initialize(void)
+{
+    UART2_Initialize();
+}
+
+void UART2_Initialize(void)
+{
+    // Set UART2 pins
+    TRISBbits.TRISB6 = 0;  // TX2 pin as output
+    TRISBbits.TRISB7 = 1;  // RX2 pin as input
+    
+    // Configure UART2
+    TXSTA2bits.TXEN = 1;   // Enable transmitter
+    RCSTA2bits.SPEN = 1;   // Enable serial port
+    RCSTA2bits.CREN = 1;   // Enable continuous reception
+    
+    // Set baud rate to 115200 (for EC200 module)
+    BAUDCON2bits.BRG16 = 1;  // Use 16-bit baud rate generator
+    TXSTA2bits.BRGH = 1;     // High-speed baud rate
+    SPBRGH2 = 0;             // For 115200 baud at 4MHz
+    SPBRG2 = 8;              // 8 for 115200 baud
+    
+    // Enable UART receive interrupt
+    PIE3bits.RC2IE = 1;
+}
+
+void UART2_TransmitChar(char c)
+{
+    while(!PIR3bits.TX2IF);  // Wait for transmit buffer to be empty
+    TXREG2 = c;
+}
+
+void UART2_TransmitString(const char* str)
+{
+    while(*str != '\0')
+    {
+        UART2_TransmitChar(*str);
+        str++;
+    }
+}
+
+void sendEC200Command(const char* command)
+{
+    UART2_TransmitString(command);
+}
+
+void processEC200Response(void)
+{
+    // Here you can add code to process the response from EC200 module
+    // For now, we'll just clear the buffer
+    memset(ec200Buffer, 0, EC200_BUFFER_SIZE);
+}
